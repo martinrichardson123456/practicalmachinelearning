@@ -1,0 +1,489 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Martin Richardson"
+date: "16/10/17"
+output: html_document
+---
+
+```{r loading libraries, echo = FALSE, cache = FALSE, results = "hide", warning = FALSE, message = FALSE}
+library(caret)
+library(rpart)
+library(purrr)
+library(dplyr)
+library(rpart)
+library(gbm)
+library(corrplot)
+library(rattle)
+library(pROC)
+```
+
+# Synopsis
+
+Motion data from accelerometers attached to the belt, forearm, arm and dumbbell of six test subjects have been recorded whilst the subjects perform barbell lifts correctly and incorrectly in five different ways. The quality of their exercise, henceforth referred to as 'classe', is given a letter rating (A, B, C, D, or E). The aim of this report is to apply machine learning techniques to this data, to build models that will predict the classe outcome for some other accelerometer data (for which classe is not already known; the solutions are to be entered into a quiz later). Four different categories of model are generated and their results compared. The best overall accuracy achieved is 99.9%, using a 'random forest' model.
+
+The data used to train the models is found at:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The used to predict 20 solutions for the quiz is found at:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Further information on the data is found at:
+http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+# Loading and cleaning raw data
+
+<br>
+After first placing the files ".../pml-training.csv" and ".../pml-testing.csv" in the current working directory, the raw data is loaded from csv files, with the 'training' and 'testing' data sets stored in the dataframes 'pml_training' and 'pml_testing':
+```{r loading raw data, cache = TRUE}
+pml_training <- read.csv("pml-training.csv")
+pml_testing  <- read.csv("pml-testing.csv")
+```
+
+<br>
+Now the number of rows and columns in pml_training and pml_testing are counted:
+```{r}
+dim(pml_training); dim(pml_testing)
+```
+
+<br>
+Here the names of their columns are retrieved, and any column names that appear in pml_training but not pml_testing are displayed:
+```{r}
+names_training <- names(pml_training); names_testing  <- names(pml_testing)
+names_training[!(names_training %in% names_testing)]; names_testing[!(names_testing %in% names_training)]
+```
+
+<br>
+So 'classe' is the only column that appears in pml_training but not in pml_testing, where instead the column is called 'problem_id'; the outcome for each of the 20 rows in pml_testing is missing but will be predicted using the models I build based on the training data, and submitted in the later quiz. 
+
+The number and proportion of each possible outcome ('classe') in pml_training are as follows: 
+```{r}
+table(pml_training$classe); prop.table(table(pml_training$classe))
+```
+Since there are quite significant differences in the fractions of each outcome level, this may affect the choice of prediction model I build later on.
+
+```{r}
+plot(pml_training$classe, main = "Number of each outcome in 'classe' column of pml_training",
+     xlab = "classe level", ylab = "count")
+```
+
+<br>
+The raw data contains cells that are 'NA', "#DIV/0!", or blank (""). The first step in cleaning the data is to make any blank or "#DIV/0!" cells contain NA instead:
+```{r make blank cells NA, cache = TRUE, error = FALSE}
+# turn empty cells into NA cells  
+for(j in 1:ncol(pml_training)){
+  this_col <- pml_training[j]
+  this_col[this_col == ""] <- NA
+  this_col[this_col == "#DIV/0!"] <- NA
+  pml_training[j] <- this_col
+
+  this_col <- pml_testing[j]
+  this_col[this_col == ""] <- NA
+  this_col[this_col == "#DIV/0!"] <- NA
+  pml_testing[j] <- this_col
+}
+```
+
+<br>
+Now that all blank or "#DIV/0!" cells have been replaced with 'NA' cells, the percentage of each column that is cells with NA is calculated and displayed as follows:
+```{r percentage of columns NA, cache = TRUE}
+vector__column_NA_percentages <- vector()
+for(j in 1:ncol(pml_training)){
+  count_NA_in_current_column <- sum(is.na(pml_training[j]))
+  percent_NA_in_current_column <- 100 * count_NA_in_current_column / nrow(pml_training)
+  vector__column_NA_percentages <- c(vector__column_NA_percentages, percent_NA_in_current_column)
+}
+print(round(vector__column_NA_percentages, 3))
+print(length(vector__column_NA_percentages)); print(sum(vector__column_NA_percentages == 0)); 
+```
+
+<br>
+So 60 of the 160 columns are then found to have no 'NA' values at all, and for the other columns, approximately 98-100% of the entries are 'NA'. Now only the columns that contain no 'NA' cells are kept, with the result stored as the dataframe 'pml_training_smaller':
+```{r removing columns with NA, cache = TRUE}
+pml_training_smaller <- data.frame()
+for(j in 1:ncol(pml_training)){
+    if(sum(is.na(pml_training[j])) == 0){
+        if(j == 1) pml_training_smaller <- pml_training[j]
+        else{
+            pml_training_smaller <- cbind(pml_training_smaller, pml_training[j])
+        } 
+    }
+}
+```
+
+<br>
+The 'nearZeroVar()' function can be used to remove of columns that have low variance and are thus useless to explain the variation in 'classe'. All columns in pml_training_smaller with near zero variance are now identified, using default settings for nearZeroVar() (it has been decided to keep the default settings due to uncertainty over how to judge what an approprite amount would be):
+```{r find nearZeroVar cols, cache = TRUE}
+#pml_training_smaller__nZV <- nearZeroVar(x = pml_training_smaller, names = FALSE, freqCut = 1, uniqueCut = 10)
+pml_training_smaller__nZV <- nearZeroVar(x = pml_training_smaller, names = FALSE)
+
+dummy_vec__nZV <- vector()
+for(i in 1:length(pml_training_smaller__nZV)){
+  if(pml_training_smaller__nZV[i] > 7){ # the first 7 columns are not predictors but rather username etc
+    dummy_vec__nZV <- c(dummy_vec__nZV, pml_training_smaller__nZV[i])
+  }
+}
+pml_training_smaller__nZV <- dummy_vec__nZV
+print(pml_training_smaller__nZV)
+```
+
+<br>
+Now all columns in pml_training_smaller deemed to have near zero variance are removed:
+```{r remove nearZeroVar cols}
+if(length(pml_training_smaller__nZV) > 0){
+  pml_training_smaller <- pml_training_smaller[ , -pml_training_smaller__nZV]
+}
+print(names(pml_training_smaller))
+```
+
+<br>
+With the default settings for nearZeroVar(), no further variables have been eliminated. A corresponding subset of the testing dataset is now selected, containing only these same columns as pml_training_smaller has. First the column indices that appear in both pml_training and pml_training_smaller are found:
+```{r matching column indices to create pml_testing_smaller}
+names_vec__pml_training <- names(pml_training)
+names_vec__pml_training_smaller <- names(pml_training_smaller)
+
+matched_indices <- vector()
+for(i in 1:length(names_vec__pml_training_smaller)){
+ for(j in 1:length(names_vec__pml_training)){
+   if(names_vec__pml_training[j] == names_vec__pml_training_smaller[i]){
+     matched_indices <- c(matched_indices, j)
+   }
+ }
+}
+```
+
+<br>
+Now only the relevant columns in pml_testing are retained, with the result stored as 'pml_testing_smaller':
+```{r}
+pml_testing_smaller <- pml_testing[ , matched_indices]
+```
+
+<br>
+The first 7 columns from pml_training_smaller and pml_testing_smaller are now removed since they are not predictors (eg. the subject's name is not going to be of any use in predicting the exercise quality outcome), so there are really 60 - 7 - 1 = 52 predictors:
+```{r}
+pml_training_smaller <- pml_training_smaller[ , -c(1:7)]
+pml_testing_smaller  <- pml_testing_smaller[ , -c(1:7)]
+```
+
+<br>
+The column names of pml_testing_smaller are set to be the same as that of pml_training_smaller, and the final column in pml_testing_smaller is made to have the class 'factor' and contain only NA values: 
+```{r}
+colnames(pml_testing_smaller) <- colnames(pml_training_smaller)
+pml_testing_smaller$classe <- NA
+pml_testing_smaller$classe <- as.factor(pml_testing_smaller$classe)
+dim(pml_training_smaller); dim(pml_testing_smaller)
+```
+
+<br>
+It is now checked that the data types in each column are the same for pml_training_smaller and pml_testing_smaller, with any differences determined as follows:
+```{r check column classes, cache = FALSE}
+classes_training <- sapply(X = pml_training_smaller, class)
+classes_testing  <- sapply(X = pml_testing_smaller, class)
+setdiff(classes_training, classes_testing)
+```
+
+<br>
+Thus, there are no differences between the pml_training_smaller and pml_testing_smaller other than the number of rows and the fact that the 'classe' column contains only 'NA' values in pml_testing_smaller. The data appears to be as streamlined as it can reasonably be made at this point. 
+
+<br>
+The training dataset pml_training_smaller is now partitioned 70/30 to get new training and testing sets out of it, referred to as 'training_subset' and 'testing_subset':
+```{r data partitioning, cache = TRUE}
+partition <- createDataPartition(pml_training_smaller$classe, p=0.7, list=FALSE)
+training_subset <- pml_training_smaller[partition, ]
+testing_subset <- pml_training_smaller[-partition, ]
+dim(training_subset); dim(testing_subset)
+```
+
+
+-----
+
+# Analysis of cleaned data
+
+## Model choice explanation
+
+For predicting a categorical variable, one option is to use logistic regression, or rather, since the outcome is A, B, C, D, or E (i.e. 5 levels rather than binary), multiple logistic regression would have to be used. However, overfitting is a risk, only the meaningful variables should be included. Ensuring this has been fulfilled seems more work than is necessary, so other types of model will be considered instead.
+
+One alternative to logistic regression is linear discriminant analysis. This works better than multiple-class logistic regressions when the categories of the outcome are well-separated, and when then number of observations is small. The latter doesn't apply to my dataset, and the former I am uncertain of, so this will also be avoided. 
+
+Another model type to consider is a 'support vector machine', but this is better used for a binary classification, whereas I have five levels in my outcome. Also, the levels form quite different proportions of the training dataset, which can pose a problem for SVM models, so this may also mean SVM is a bad choice in this instance.
+
+'K Nearest Neighbours' does not handle high numbers of dimensions well, Which is something this dataset does have. This approach is thus ruled out also.
+
+A decision tree model is more appealing since it will be appropriate for a large data set such as this one. Also it will automatically perform a feature selection. There will also be no need for variable transformations (eg. normalization) since the tree structure will remain the same regardless. It will also have a relatively short run-time. However, decision trees are prone to over-fitting, but this can be reduced by pruning the tree (which also seems more effort than necessary), or by using multiple-tree-based models such as bagging, boosting and random forests.
+
+In bagging (i.e. 'bootstrap aggregating'), many large decision trees are fitted to bootstrap-resampled (with replacement) versions of the training data, and classified by majority vote (i.e. taking the average classification result based on all these resamples). In boosting, the entire dataset is used. Many large or small trees are fitted to reweighted versions of the training data, with classfication via weighted majority vote. Random forest models also use many trees based on bootstrapped samples of the training data. Such models randomly create subsets of the features and build smaller trees using these subsets, before combining the subtrees. This is similar to bagging but tries to improve on it by de-correlating the trees; using a small number of predictors to build trees is helpful when there are a large number of correlated predictors. 
+```{r correlation plot, cache = TRUE, warning = FALSE}
+correlations <- cor(pml_training_smaller[ , -ncol(pml_training_smaller)])
+corrplot(correlations, method="color")
+```
+
+The figure above indicates that a number of predictors are indeed significantly correlated. Thus, simple decision tree, bagging, boosting and random forest models will all be generated and compared.
+
+Cross-validation will also be used, i.e. the training data will partitioned into K subsets, where the training data is K-1 of these subsets, and what remains is used as a testing data set. This is repeated, using all of the K subsets in turn as the testing set, then finally an average is taken (the variance decreases as K increases). The number of folds K used will be 10, simply because this is the default number in the relevant model-building function.
+
+
+---
+
+## Decision trees
+
+### Decision tree using rpart()
+
+<br>
+The rpart() function incorporates 10-fold cross-validation by default. A decision tree built using the rpart() function is now trained to predict the outcome classe, using the training_subset data:
+```{r modfit_rpart, cache = TRUE}
+set.seed(1)
+ptm <- proc.time() # Start the clock!
+modfit_rpart <- rpart(classe ~ ., data = training_subset, method = "class") # works
+proctime_modfit_rpart <- proc.time() - ptm # Stop the clock
+```
+
+<br>
+This model is now used to predict what the outcomes of the testing dataset (that is, 'testing_subset' rather than 'pml_training_smaller'), and its predictions compared to the known outcomes in testing_subset, to judge the accuracy of the model:
+```{r decision tree predictions, cache = FALSE}
+pred_rpart <- predict(modfit_rpart, testing_subset, type = "class")
+confmat_rpart <- confusionMatrix(pred_rpart, testing_subset$classe)
+confmat_rpart
+```
+
+<br>
+Thus, the model generated via the rpart() function is found to have 71.4% accuracy overall (a range of 70.2-72.6% at 95% confidence), with the specificity and sensitivity for each of the outcome levels showing large variations. Further models will later be explored in an attempt to improve on these achievements.
+The 20 most significant variables are as follows:
+
+```{r var_imps}
+var_imps <- varImp(modfit_rpart)
+vi_df <- data.frame(rownames(var_imps), var_imps$Overall)
+colnames(vi_df) <- c("Variable", "Importance")
+vi_df_reordered <- vi_df[order(-vi_df$Importance), ]
+knitr::kable(list(vi_df_reordered[1:10, ], vi_df_reordered[11:20, ]), row.names = FALSE)
+```
+
+
+
+### Decision tree using train(..., method = "rpart")
+
+An alternative way of generating the decision tree is now also examined; the train() function with the 'method = "rpart"' argument is used:
+```{r modfit_train_rpart, cache = TRUE}
+set.seed(1)
+ptm <- proc.time() # Start the clock!
+modfit_train_rpart <- train(classe ~ ., data = training_subset, method = "rpart")
+proctime_modfit_train_rpart <- proc.time() - ptm # Stop the clock
+```
+
+```{r pred_train_rpart, cache = TRUE}
+pred_train_rpart <- predict(modfit_train_rpart, testing_subset)
+confmat_train_rpart <- confusionMatrix(pred_train_rpart, testing_subset$classe)
+acc_confmat_train_rpart <- confmat_train_rpart$overall['Accuracy']
+print(acc_confmat_train_rpart)
+```
+
+<br>
+The overall accuracy is approximately 50% (i.e. as good as a coin toss), which is obviously poor. However, this is because the rpart() function incorporates 10-fold cross-validation by default whereas the train() function does not, so this can now be applied. For reference, the following code chunk demonstrates an attempt which produces an identical accuracy, but this will be followed up by a working attempt:
+```{r modfit_train_rpart_CV, cache = TRUE}
+set.seed(1)
+ptm <- proc.time() # Start the clock!
+modfit_train_rpart_CV <- train(classe ~ ., data = training_subset, method = "rpart", 
+                               trControl = trainControl(method = "cv", number = 10))
+proctime_modfit_rpart_CV <- proc.time() - ptm # Stop the clock
+```
+
+```{r pred_train_rpart_CV, cache = TRUE}
+pred_train_rpart_CV <- predict(modfit_train_rpart_CV, testing_subset)
+confmat_train_rpart_CV <- confusionMatrix(pred_train_rpart_CV, testing_subset$classe)
+acc_confmat_train_rpart_CV <- confmat_train_rpart_CV$overall['Accuracy']
+print(acc_confmat_train_rpart_CV)
+```
+<br>
+Thus, attempting to introduce cross-validation via the trControl argument in train() is ineffective.
+A working way to include cross-validation using the train() function is via the 'cp' or 'complexity parameter' value (i.e. if any split does not increase the overall R^2 value of the model by at least the value of cp, then that split is not computed), which for rpart() is 0.01 by default:
+```{r modfit_train_rpart_none, cache = TRUE}
+set.seed(1)
+ptm <- proc.time() # Start the clock!
+modfit_train_rpart_none <- train(classe ~ ., method = "rpart", data = training_subset,
+                                 trControl=trainControl(method="none"),
+                                 tuneGrid=data.frame(cp = 0.01))
+proctime_modfit_train_rpart_none <- proc.time() - ptm # Stop the clock
+```
+
+```{r pred_train_rpart_none, cache = TRUE}
+pred_train_rpart_none <- predict(modfit_train_rpart_none, testing_subset)
+confmat_train_rpart_none <- confusionMatrix(pred_train_rpart_none, testing_subset$classe)
+acc_confmat_train_rpart_none <- confmat_train_rpart_none$overall['Accuracy']
+print(acc_confmat_train_rpart_none)
+```
+
+<br>
+So when cross-validation is introduced while generating the decision tree using train(), the overall accuracy becomes 73.8% (ranging between 72.3-74.5% at 95% confidence), which is in agreement with the 70.2-72.6% range for the rpart() predictions. 
+
+This level of accuracy still leaves a lot to be desired, so more complex models are now investigated.
+
+---
+
+## Boosting
+
+A 'boosting' model is now tested to see whether it brings any gains in accuracy over the simple decision tree model of the previous section. The model is trained on the training_subset data as follows:
+```{r modfit_train_gbm, cache = TRUE, results='hide', warning = FALSE, message = FALSE}
+set.seed(1)
+ptm <- proc.time() # Start the clock!
+modfit_train_gbm <- train(classe ~ ., data = training_subset, method = "gbm") # works
+proctime_modfit_train_gbm <- proc.time() - ptm # Stop the clock
+```
+
+<br>
+The predictions of this model for the testing_subset data and a confusion matrix to assess their accuracy are generated as follows:
+```{r pred_train_gbm, cache = TRUE}
+pred_train_gbm <- predict(modfit_train_gbm, testing_subset)
+confmat_train_gbm <- confusionMatrix(pred_train_gbm, testing_subset$classe)
+confmat_train_gbm
+```
+
+<br>
+Thus in this instance the overall accuracy of the model is 96.8% (ranging between 96.3-97.2% at 95% confidence). This is a major improvement over the 69% accuracy of the simple decision tree model and the sensitivity and specificity for individual outcome levels has a far smaller range.
+
+---
+
+## Bagging
+
+A 'bagging' model is now tested to see whether it brings any gains in accuracy over the boosting model of the previous section. Since this type of model uses the entire training data set rather than taking various samples from it, the model is trained on  pml_training_smaller (rather than training_subset, which is a subset of pml_training_smaller), [NOT ANYMORE I CHANGED IT] as follows:
+```{r modfit_train_bag, cache = TRUE}
+set.seed(1)
+ptm <- proc.time() # Start the clock!
+modfit_train_bag <- train(classe ~ ., data = training_subset, method = "treebag")
+proctime_modift_train_bag <- proc.time() - ptm # Stop the clock
+```
+
+The predictions and the confusion matrix and other summarising information are generated as follows:
+```{r pred_train_bag, cache = TRUE}
+pred_train_bag <- predict(modfit_train_bag, testing_subset)
+confmat_train_bag <- confusionMatrix(pred_train_bag, testing_subset$classe)
+confmat_train_bag
+```
+
+Thus, with a 99.5% overall accuracy (between 99.3-99.7% at 95% confidence), the bagging approach offers a small improvement over the 97% achieved via boosting. There is also an improvement in sensitivity and specificity for each individual outcome level compared to boosting, with tiny (<1%) differences between them.
+
+---
+
+## Random forest
+
+A 'random forest' model is now tested to see whether it brings any gains in accuracy over the bagging model of the previous section:
+
+```{r modfit_train_rf, cache = TRUE, warning = FALSE, message = FALSE}
+set.seed(1)
+ptm <- proc.time() # Start the clock!
+modfit_train_rf <- train(classe ~ ., data = training_subset, method =  "rf") # works
+proctime_modfit_train_rf <- proc.time() - ptm # Stop the clock
+```
+
+<br>
+The predictions and the confusion matrix and other summarising information are generated as follows:
+```{r random forest predictions, cache = TRUE}
+pred_train_rf <- predict(modfit_train_rf, testing_subset)
+confmat_train_rf <- confusionMatrix(pred_train_rf, testing_subset$classe)
+confmat_train_rf
+```
+
+The random forest approach results in an overall accuracy of 99.86% (ranging between 99.7-99.9% at 95% confidence). This matches the accuracy of the bagging model and there is very little to distinguish this model from bagging in terms of individual specificities or sensitivities. 
+
+---
+
+## Summary of model accuracies
+
+The overall accuracy and out-of-sample error estimate for each of the four models tested are displayed as follows:
+```{r model summary table, cache = FALSE, error = TRUE}
+acc_rpart <- as.numeric(round(100 * confmat_rpart$overall[1], 1))
+acc_train_rpart_none <- as.numeric(round(100 * confmat_train_rpart_none$overall[1], 1))
+acc_train_gbm <- as.numeric(round(100 * confmat_train_gbm$overall[1], 1))
+acc_train_bag <- as.numeric(round(100 * confmat_train_bag$overall[1], 1))
+acc_train_rf <- as.numeric(round(100 * confmat_train_rf$overall[1], 1))
+
+oos_rpart <- 100 - acc_rpart;  oos_train_rpart_none <- 100 - acc_train_rpart_none;  
+oos_train_gbm <- 100 - acc_train_gbm;   oos_train_bag <- 100 - acc_train_bag;  
+oos_train_rf <- 100 - acc_train_rf
+
+summary_table_values <- c(acc_rpart, oos_rpart, as.numeric(proctime_modfit_rpart[3]),
+                          acc_train_rpart_none, oos_train_rpart_none,
+                          as.numeric(proctime_modfit_train_rpart_none[3]),
+                          acc_train_gbm, oos_train_gbm, as.numeric(proctime_modfit_train_gbm[3]),
+                          acc_train_bag, oos_train_bag, as.numeric(proctime_modift_train_bag[3]),
+                          acc_train_rf, oos_train_rf, as.numeric(proctime_modfit_train_rf[3]))
+
+summary_table <- matrix(summary_table_values, ncol = 3, byrow = TRUE)
+colnames(summary_table) <- c("Accuracy (%)", "Out-of-sample error (%)", "Runtime (s)")
+rownames(summary_table) <- c("Decision tree (rpart())", "Decision tree (train())", 
+                             "Boosting", "Bagging", "Random forest")
+summary_table <- as.table(summary_table)
+summary_table
+```
+
+<br>
+Since there were 5 possible classe outcome levels, an ROC curve based only on predicting the most common outcome in the training data (i.e. classe == "A" vs. classe != "A") is generated as follows:
+```{r plot.roc, cache = TRUE}
+# response_col and predictor_col must be in binary format or roc() will fail
+# so all classe = "A" become 1 and the rest become 0
+response_col <- testing_subset$classe
+response_col <- as.character(response_col)
+response_col[response_col == "A"] <- as.numeric(1)
+response_col[response_col != 1] <- as.numeric(0)
+response_col <- as.numeric(response_col)
+
+for(i in 1:5){
+  if(i == 1) this_pred <- pred_rpart
+  if(i == 2) this_pred <- pred_train_rpart_none
+  if(i == 3) this_pred <- pred_train_gbm
+  if(i == 4) this_pred <- pred_train_bag
+  if(i == 5) this_pred <- pred_train_rf
+  
+  predictor_col <- as.character(this_pred)
+  predictor_col[predictor_col == "A"] <- as.numeric(1)
+  predictor_col[predictor_col != 1] <- as.numeric(0)
+  predictor_col <- as.numeric(predictor_col)
+
+  colours <- c("blue", "orange", "green", "red", "black")
+  line_types <- c(1, 2, 1, 1, 4)
+  which_add <- c(FALSE, TRUE, TRUE, TRUE, TRUE)
+  ROC_plot <- plot(roc(response = response_col, predictor = predictor_col), print.auc = TRUE, 
+                   col = colours[i], add = which_add[i], print.auc.y = 0.1 * i, lty = line_types[i])
+}
+```
+The black, red, green, orange and blue lines correspond to the models in the reverse order that they appear in the summary table above.
+
+<br>
+Plots of sensitivity vs. specificity for each possible level for of each of the classification models (aside from the decision tree built using train(..., method = "rpart")) are now generated as follows: 
+```{r sensitiv}
+lvls <- as.character(levels(testing_subset$classe))
+par(mfrow=c(2,2))
+plot(confmat_rpart$byClass, main = "Decision tree (rpart)", xlim = c(0.55, 0.9), ylim = c(0.8, 1))
+text(confmat_rpart$byClass[ , 1] + 0.02, confmat_rpart$byClass[ , 2], labels = lvls, cex = 0.7)
+plot(confmat_train_bag$byClass, main = "Bagging", xlim = c(0.99, 1), ylim = c(0.997, 1.001))
+text(confmat_train_bag$byClass[ , 1] + 0.0005, confmat_train_bag$byClass[ , 2], labels = lvls, cex = 0.7)
+plot(confmat_train_gbm$byClass, main = "Boosting", xlim = c(0.94, 1), ylim = c(0.98, 1))
+text(confmat_train_gbm$byClass[ , 1] + 0.0025, confmat_train_gbm$byClass[,2], labels = lvls, cex = 0.7)
+plot(confmat_train_rf$byClass, main = "Random forest", xlim = c(0.996, 1.0005), ylim = c(0.9990, 1.0001))
+text(confmat_train_rf$byClass[ , 1] + 0.00025, confmat_train_rf$byClass[ , 2], labels = lvls, cex = 0.7)
+```
+
+These plots illustrate how the sensitivity (i.e. correctly identifying outcome "x" as "x") and the specificity (i.e. correctly identifying outcome "not x" as "not x") both improve for each outcome level, in absolute terms and in terms of their range, when progressing from Decision tree (rpart) -> Boosting -> Bagging --> Random Forest.
+
+---
+
+## Prediction on main testing data
+
+Unlike the training data, the testing data found in pml_testing_smaller does not contain values for the classe outcome for each row. The four models tested in the previous section are now applied to pml_testing_smaller, so that the predictions can be submitted for the quiz:
+
+```{r predict_pml_testing, cache = TRUE, error = TRUE}
+predict_pml_testing_rpart <- as.character(predict(modfit_rpart, pml_testing_smaller, type = "class"))
+predict_pml_testing_train_rpart_none <- as.character(predict(modfit_train_rpart_none, pml_testing_smaller))
+predict_pml_testing_gbm <- as.character(predict(modfit_train_gbm, pml_testing_smaller))
+predict_pml_testing_bag <- as.character(predict(modfit_train_bag, pml_testing_smaller))
+predict_pml_testing_rf <- as.character(predict(modfit_train_rf, pml_testing_smaller))
+
+prediction_table_values <- c(predict_pml_testing_rpart, predict_pml_testing_train_rpart_none,
+                             predict_pml_testing_gbm, predict_pml_testing_bag, predict_pml_testing_rf)
+
+prediction_table <- matrix(prediction_table_values, ncol = 20, byrow = TRUE)
+colnames(prediction_table) <- c(1:20)
+rownames(prediction_table) <- c("Decision tree (rpart())", "Decision tree (train())", 
+                                "Boosting", "Bagging", "Random forest")
+prediction_table <- as.table(prediction_table)
+prediction_table
+```
+
+The boosting, bagging and random forest models all make identical predictions. The simple decision trees make some different predictions but they are far less accurate models than the latter three; the predictions made by those three will be the answers used for the quiz.
